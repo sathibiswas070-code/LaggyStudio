@@ -1,0 +1,82 @@
+{
+  "settings": {
+    "1534164433016852581": {
+      "applicationChannel": "1549054003219005500",
+      "statusChannel": "1548925549160824884",
+      "managerRole": null,
+      "applicationLogChannel": "1549053464515190784"
+    },
+    "1495383199981895770": {
+      "applicationChannel": null,
+      "statusChannel": null,
+      "managerRole": null
+    }
+  },
+  "tasks": [
+    {
+      "id": 1,
+      "guildId": "1534164433016852581",
+      "title": "Happy",
+      "description": "Jst be happy gng",
+      "assignedTo": "1259429784983965709",
+      "status": "open",
+      "createdBy": "1259429784983965709",
+      "createdAt": 1789363212958
+    }
+  ],
+  "statuses": {
+    "1534164433016852581": {
+      "1259429784983965709": {
+        "status": "away",
+        "updatedAt": 1789393447371
+      }
+    },
+    "1495383199981895770": {
+      "1180896204800917626": {
+        "status": "away",
+        "message": "",
+        "updatedAt": 1789558462604
+      }
+    },
+    "1259429784983965709": {
+      "guildId": "1495383199981895770",
+      "userId": "1259429784983965709",
+      "status": "idle",
+      "message": "kaaj nai :/",
+      "updatedAt": "2026-09-18T06:29:10.342Z"
+    }
+  },
+  "notes": {
+    "1534164433016852581": {
+      "1259429784983965709": [
+        {
+          "id": 1789362937629,
+          "text": "hello I'm a designer",
+          "createdAt": 1789362937629
+        }
+      ]
+    },
+    "1259429784983965709": [
+      {
+        "id": 1,
+        "text": "idk bruh",
+        "createdAt": "2026-09-18T06:28:39.164Z"
+      }
+    ]
+  },
+  "applications": [
+    {
+      "id": 1,
+      "guildId": "1495383199981895770",
+      "userId": "1538578838014005318",
+      "username": "usshiel0609",
+      "position": "Modeler",
+      "rate": "$0.001/hour",
+      "reason": "I'm just curious to know new things. Specially creative stuffs, where i cud create whatever i want with my creativity.",
+      "status": "pending",
+      "createdAt": "2026-09-22T03:33:26.202Z"
+    }
+  ],
+  "rateRequests": [],
+  "polls": {}
+}

@@ -1,0 +1,1212 @@
+require("dotenv").config();
+
+const {
+  Client,
+  GatewayIntentBits,
+  Partials,
+  REST,
+  Routes,
+  SlashCommandBuilder,
+  EmbedBuilder,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  ModalBuilder,
+  TextInputBuilder,
+  TextInputStyle,
+  PermissionFlagsBits,
+  ChannelType
+} = require("discord.js");
+
+const Database = require("better-sqlite3");
+
+// ============================================================
+// CONFIG
+// ============================================================
+
+const TOKEN = process.env.DISCORD_TOKEN;
+const CLIENT_ID = process.env.CLIENT_ID;
+const GUILD_ID = process.env.GUILD_ID;
+
+if (!TOKEN || !CLIENT_ID || !GUILD_ID) {
+  console.error("❌ Missing DISCORD_TOKEN, CLIENT_ID, or GUILD_ID in .env");
+  process.exit(1);
+}
+
+// ============================================================
+// CLIENT
+// ============================================================
+
+const client = new Client({
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMembers
+  ],
+  partials: [Partials.Channel]
+});
+
+// ============================================================
+// DATABASE
+// ============================================================
+
+const db = new Database("database.sqlite");
+
+db.pragma("journal_mode = WAL");
+
+db.exec(`
+CREATE TABLE IF NOT EXISTS settings (
+  guild_id TEXT PRIMARY KEY,
+  application_channel TEXT,
+  status_channel TEXT,
+  application_log_channel TEXT,
+  manager_role TEXT
+);
+
+CREATE TABLE IF NOT EXISTS tasks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  guild_id TEXT,
+  title TEXT,
+  description TEXT,
+  assigned_to TEXT,
+  status TEXT DEFAULT 'open',
+  created_by TEXT,
+  created_at INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS statuses (
+  guild_id TEXT,
+  user_id TEXT,
+  status TEXT,
+  updated_at INTEGER,
+  PRIMARY KEY (guild_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS notes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  guild_id TEXT,
+  user_id TEXT,
+  note TEXT,
+  created_at INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS rate_requests (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  guild_id TEXT,
+  user_id TEXT,
+  current_rate TEXT,
+  requested_rate TEXT,
+  reason TEXT,
+  status TEXT DEFAULT 'pending',
+  created_at INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS applications (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  guild_id TEXT,
+  user_id TEXT,
+  position TEXT,
+  rate TEXT,
+  reason TEXT,
+  created_at INTEGER
+);
+`);
+
+// ============================================================
+// HELPERS
+// ============================================================
+
+function getSettings(guildId) {
+  return db
+    .prepare("SELECT * FROM settings WHERE guild_id = ?")
+    .get(guildId);
+}
+
+function ensureSettings(guildId) {
+  db.prepare(`
+    INSERT OR IGNORE INTO settings (guild_id)
+    VALUES (?)
+  `).run(guildId);
+}
+
+function isManager(interaction) {
+  const settings = getSettings(interaction.guild.id);
+
+  if (interaction.memberPermissions?.has(PermissionFlagsBits.Administrator)) {
+    return true;
+  }
+
+  if (
+    settings?.manager_role &&
+    interaction.member.roles?.cache?.has(settings.manager_role)
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+function clean(text, max = 1000) {
+  if (!text) return "None";
+  return text.length > max ? text.slice(0, max - 3) + "..." : text;
+}
+
+// ============================================================
+// SLASH COMMANDS
+// ============================================================
+
+const commands = [
+
+  new SlashCommandBuilder()
+    .setName("setup")
+    .setDescription("Configure the developer bot.")
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .addSubcommand(sub =>
+      sub
+        .setName("applications")
+        .setDescription("Set the application log channel.")
+        .addChannelOption(opt =>
+          opt
+            .setName("channel")
+            .setDescription("Application channel")
+            .addChannelTypes(ChannelType.GuildText)
+            .setRequired(true)
+        )
+    )
+    .addSubcommand(sub =>
+      sub
+        .setName("status")
+        .setDescription("Set the developer status channel.")
+        .addChannelOption(opt =>
+          opt
+            .setName("channel")
+            .setDescription("Status channel")
+            .addChannelTypes(ChannelType.GuildText)
+            .setRequired(true)
+        )
+    )
+    .addSubcommand(sub =>
+      sub
+        .setName("manager")
+        .setDescription("Set the manager role.")
+        .addRoleOption(opt =>
+          opt
+            .setName("role")
+            .setDescription("Manager role")
+            .setRequired(true)
+        )
+    ),
+
+  new SlashCommandBuilder()
+    .setName("task")
+    .setDescription("Developer task system.")
+    .addSubcommand(sub =>
+      sub
+        .setName("create")
+        .setDescription("Create a task.")
+        .addStringOption(opt =>
+          opt.setName("title").setDescription("Task title").setRequired(true)
+        )
+        .addStringOption(opt =>
+          opt.setName("description").setDescription("Task description").setRequired(true)
+        )
+    )
+    .addSubcommand(sub =>
+      sub
+        .setName("list")
+        .setDescription("Show open tasks.")
+    )
+    .addSubcommand(sub =>
+      sub
+        .setName("claim")
+        .setDescription("Claim a task.")
+        .addIntegerOption(opt =>
+          opt.setName("id").setDescription("Task ID").setRequired(true)
+        )
+    )
+    .addSubcommand(sub =>
+      sub
+        .setName("complete")
+        .setDescription("Complete your claimed task.")
+        .addIntegerOption(opt =>
+          opt.setName("id").setDescription("Task ID").setRequired(true)
+        )
+    ),
+
+  new SlashCommandBuilder()
+    .setName("devpoll")
+    .setDescription("Create a developer poll.")
+    .addStringOption(opt =>
+      opt.setName("question").setDescription("Poll question").setRequired(true)
+    )
+    .addStringOption(opt =>
+      opt.setName("option1").setDescription("First option").setRequired(true)
+    )
+    .addStringOption(opt =>
+      opt.setName("option2").setDescription("Second option").setRequired(true)
+    )
+    .addStringOption(opt =>
+      opt.setName("option3").setDescription("Third option").setRequired(false)
+    ),
+
+  new SlashCommandBuilder()
+    .setName("status")
+    .setDescription("Set or view developer status.")
+    .addSubcommand(sub =>
+      sub
+        .setName("set")
+        .setDescription("Set your status.")
+        .addStringOption(opt =>
+          opt
+            .setName("status")
+            .setDescription("Your current status")
+            .setRequired(true)
+            .addChoices(
+              { name: "🟢 Working", value: "working" },
+              { name: "🟡 Away", value: "away" },
+              { name: "🔴 Offline", value: "offline" }
+            )
+        )
+    )
+    .addSubcommand(sub =>
+      sub
+        .setName("view")
+        .setDescription("View developer statuses.")
+    ),
+
+  new SlashCommandBuilder()
+    .setName("note")
+    .setDescription("Private personal developer notes.")
+    .addSubcommand(sub =>
+      sub
+        .setName("add")
+        .setDescription("Create a private note.")
+        .addStringOption(opt =>
+          opt.setName("text").setDescription("Your note").setRequired(true)
+        )
+    )
+    .addSubcommand(sub =>
+      sub
+        .setName("list")
+        .setDescription("Show your private notes.")
+    )
+    .addSubcommand(sub =>
+      sub
+        .setName("delete")
+        .setDescription("Delete one of your notes.")
+        .addIntegerOption(opt =>
+          opt.setName("id").setDescription("Note ID").setRequired(true)
+        )
+    ),
+
+  new SlashCommandBuilder()
+    .setName("apply")
+    .setDescription("Open the developer application form."),
+
+  new SlashCommandBuilder()
+    .setName("rate")
+    .setDescription("Monthly rate request system.")
+    .addSubcommand(sub =>
+      sub
+        .setName("request")
+        .setDescription("Request a rate increase.")
+        .addStringOption(opt =>
+          opt.setName("current").setDescription("Current rate").setRequired(true)
+        )
+        .addStringOption(opt =>
+          opt.setName("requested").setDescription("Requested rate").setRequired(true)
+        )
+        .addStringOption(opt =>
+          opt.setName("reason").setDescription("Why should your rate increase?").setRequired(true)
+        )
+    )
+    .addSubcommand(sub =>
+      sub
+        .setName("list")
+        .setDescription("View pending rate requests.")
+    )
+    .addSubcommand(sub =>
+      sub
+        .setName("approve")
+        .setDescription("Approve a rate request.")
+        .addIntegerOption(opt =>
+          opt.setName("id").setDescription("Request ID").setRequired(true)
+        )
+    )
+    .addSubcommand(sub =>
+      sub
+        .setName("deny")
+        .setDescription("Deny a rate request.")
+        .addIntegerOption(opt =>
+          opt.setName("id").setDescription("Request ID").setRequired(true)
+        )
+    )
+
+].map(command => command.toJSON());
+
+// ============================================================
+// REGISTER COMMANDS
+// ============================================================
+
+const rest = new REST({ version: "10" }).setToken(TOKEN);
+
+async function registerCommands() {
+  try {
+    console.log("🔄 Registering slash commands...");
+
+    await rest.put(
+      Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID),
+      { body: commands }
+    );
+
+    console.log("✅ Slash commands registered.");
+  } catch (error) {
+    console.error("❌ Command registration failed:", error);
+  }
+}
+
+// ============================================================
+// READY
+// ============================================================
+
+client.once("ready", async () => {
+  console.log("=================================");
+  console.log(`🤖 Logged in as ${client.user.tag}`);
+  console.log("🚀 Developer bot is online!");
+  console.log("=================================");
+
+  const guild = client.guilds.cache.get(GUILD_ID);
+
+  if (guild) {
+    ensureSettings(guild.id);
+  }
+
+  await registerCommands();
+});
+
+// ============================================================
+// INTERACTIONS
+// ============================================================
+
+client.on("interactionCreate", async interaction => {
+
+  try {
+
+    // --------------------------------------------------------
+    // BUTTONS
+    // --------------------------------------------------------
+
+    if (interaction.isButton()) {
+
+      // APPLICATION BUTTON
+      if (interaction.customId === "open_application") {
+
+        const modal = new ModalBuilder()
+          .setCustomId("application_modal")
+          .setTitle("Developer Application");
+
+        const position = new TextInputBuilder()
+          .setCustomId("position")
+          .setLabel("What position are you applying for?")
+          .setPlaceholder("GFX Designer, 3D Modeler, Scripter...")
+          .setStyle(TextInputStyle.Short)
+          .setRequired(true)
+          .setMaxLength(100);
+
+        const rate = new TextInputBuilder()
+          .setCustomId("rate")
+          .setLabel("What is your rate?")
+          .setPlaceholder("Example: $10 per thumbnail")
+          .setStyle(TextInputStyle.Short)
+          .setRequired(true)
+          .setMaxLength(200);
+
+        const reason = new TextInputBuilder()
+          .setCustomId("reason")
+          .setLabel("Why do you want to join?")
+          .setPlaceholder("Tell us a little about yourself...")
+          .setStyle(TextInputStyle.Paragraph)
+          .setRequired(true)
+          .setMaxLength(1000);
+
+        modal.addComponents(
+          new ActionRowBuilder().addComponents(position),
+          new ActionRowBuilder().addComponents(rate),
+          new ActionRowBuilder().addComponents(reason)
+        );
+
+        return interaction.showModal(modal);
+      }
+
+      // POLL BUTTONS
+      if (interaction.customId.startsWith("poll_")) {
+
+        const parts = interaction.customId.split("_");
+        const pollId = parts[1];
+        const option = parts[2];
+
+        return interaction.reply({
+          content: `✅ You voted for **Option ${option}**.`,
+          ephemeral: true
+        });
+      }
+    }
+
+    // --------------------------------------------------------
+    // MODAL
+    // --------------------------------------------------------
+
+    if (interaction.isModalSubmit()) {
+
+      if (interaction.customId === "application_modal") {
+
+        const settings = getSettings(interaction.guild.id);
+
+        const position =
+          interaction.fields.getTextInputValue("position");
+
+        const rate =
+          interaction.fields.getTextInputValue("rate");
+
+        const reason =
+          interaction.fields.getTextInputValue("reason");
+
+        const result = db.prepare(`
+          INSERT INTO applications
+          (guild_id, user_id, position, rate, reason, created_at)
+          VALUES (?, ?, ?, ?, ?, ?)
+        `).run(
+          interaction.guild.id,
+          interaction.user.id,
+          position,
+          rate,
+          reason,
+          Date.now()
+        );
+
+        const embed = new EmbedBuilder()
+          .setTitle("📨 New Developer Application")
+          .setColor(0x5865F2)
+          .addFields(
+            {
+              name: "Applicant",
+              value: `<@${interaction.user.id}>`
+            },
+            {
+              name: "Position",
+              value: clean(position, 200)
+            },
+            {
+              name: "Rate",
+              value: clean(rate, 200)
+            },
+            {
+              name: "Why do they want to join?",
+              value: clean(reason, 1000)
+            },
+            {
+              name: "Application ID",
+              value: String(result.lastInsertRowid)
+            }
+          )
+          .setTimestamp();
+
+        if (settings?.application_log_channel) {
+
+          const channel =
+            interaction.guild.channels.cache.get(
+              settings.application_log_channel
+            );
+
+          if (channel) {
+            await channel.send({ embeds: [embed] });
+          }
+        }
+
+        return interaction.reply({
+          content:
+            "✅ Your application has been submitted. The development team will review it.",
+          ephemeral: true
+        });
+      }
+    }
+
+    // --------------------------------------------------------
+    // SLASH COMMANDS
+    // --------------------------------------------------------
+
+    if (!interaction.isChatInputCommand()) return;
+
+    const command = interaction.commandName;
+
+    // ========================================================
+    // SETUP
+    // ========================================================
+
+    if (command === "setup") {
+
+      if (!interaction.memberPermissions.has(
+        PermissionFlagsBits.Administrator
+      )) {
+        return interaction.reply({
+          content: "❌ Administrator permission required.",
+          ephemeral: true
+        });
+      }
+
+      ensureSettings(interaction.guild.id);
+
+      const sub = interaction.options.getSubcommand();
+
+      if (sub === "applications") {
+
+        const channel =
+          interaction.options.getChannel("channel");
+
+        db.prepare(`
+          UPDATE settings
+          SET application_log_channel = ?
+          WHERE guild_id = ?
+        `).run(channel.id, interaction.guild.id);
+
+        return interaction.reply({
+          content: `✅ Application log channel set to ${channel}.`,
+          ephemeral: true
+        });
+      }
+
+      if (sub === "status") {
+
+        const channel =
+          interaction.options.getChannel("channel");
+
+        db.prepare(`
+          UPDATE settings
+          SET status_channel = ?
+          WHERE guild_id = ?
+        `).run(channel.id, interaction.guild.id);
+
+        return interaction.reply({
+          content: `✅ Status channel set to ${channel}.`,
+          ephemeral: true
+        });
+      }
+
+      if (sub === "manager") {
+
+        const role =
+          interaction.options.getRole("role");
+
+        db.prepare(`
+          UPDATE settings
+          SET manager_role = ?
+          WHERE guild_id = ?
+        `).run(role.id, interaction.guild.id);
+
+        return interaction.reply({
+          content: `✅ Manager role set to ${role}.`,
+          ephemeral: true
+        });
+      }
+    }
+
+    // ========================================================
+    // TASKS
+    // ========================================================
+
+    if (command === "task") {
+
+      const sub = interaction.options.getSubcommand();
+
+      if (sub === "create") {
+
+        const title =
+          interaction.options.getString("title");
+
+        const description =
+          interaction.options.getString("description");
+
+        const result = db.prepare(`
+          INSERT INTO tasks
+          (guild_id, title, description, created_by, created_at)
+          VALUES (?, ?, ?, ?, ?)
+        `).run(
+          interaction.guild.id,
+          title,
+          description,
+          interaction.user.id,
+          Date.now()
+        );
+
+        return interaction.reply({
+          embeds: [
+            new EmbedBuilder()
+              .setTitle("📋 Task Created")
+              .setColor(0x57F287)
+              .addFields(
+                {
+                  name: "Task ID",
+                  value: String(result.lastInsertRowid),
+                  inline: true
+                },
+                {
+                  name: "Title",
+                  value: title,
+                  inline: true
+                },
+                {
+                  name: "Description",
+                  value: clean(description)
+                }
+              )
+          ]
+        });
+      }
+
+      if (sub === "list") {
+
+        const tasks = db.prepare(`
+          SELECT * FROM tasks
+          WHERE guild_id = ? AND status = 'open'
+          ORDER BY id DESC
+          LIMIT 15
+        `).all(interaction.guild.id);
+
+        if (!tasks.length) {
+          return interaction.reply("📋 There are no open tasks.");
+        }
+
+        const text = tasks.map(task =>
+          `**#${task.id} — ${task.title}**\n` +
+          `${clean(task.description, 200)}\n` +
+          `Status: ${task.assigned_to ? `<@${task.assigned_to}>` : "🟢 Unclaimed"}`
+        ).join("\n\n");
+
+        return interaction.reply({
+          embeds: [
+            new EmbedBuilder()
+              .setTitle("📋 Open Developer Tasks")
+              .setDescription(text)
+              .setColor(0x5865F2)
+          ]
+        });
+      }
+
+      if (sub === "claim") {
+
+        const id =
+          interaction.options.getInteger("id");
+
+        const task = db.prepare(`
+          SELECT * FROM tasks
+          WHERE id = ? AND guild_id = ?
+        `).get(id, interaction.guild.id);
+
+        if (!task) {
+          return interaction.reply({
+            content: "❌ Task not found.",
+            ephemeral: true
+          });
+        }
+
+        if (task.status !== "open") {
+          return interaction.reply({
+            content: "❌ That task is already completed.",
+            ephemeral: true
+          });
+        }
+
+        if (task.assigned_to) {
+          return interaction.reply({
+            content: "❌ Someone already claimed this task.",
+            ephemeral: true
+          });
+        }
+
+        db.prepare(`
+          UPDATE tasks
+          SET assigned_to = ?
+          WHERE id = ?
+        `).run(interaction.user.id, id);
+
+        return interaction.reply(
+          `🛠️ <@${interaction.user.id}> claimed **${task.title}**.`
+        );
+      }
+
+      if (sub === "complete") {
+
+        const id =
+          interaction.options.getInteger("id");
+
+        const task = db.prepare(`
+          SELECT * FROM tasks
+          WHERE id = ? AND guild_id = ?
+        `).get(id, interaction.guild.id);
+
+        if (!task) {
+          return interaction.reply({
+            content: "❌ Task not found.",
+            ephemeral: true
+          });
+        }
+
+        if (task.assigned_to !== interaction.user.id) {
+          return interaction.reply({
+            content: "❌ You didn't claim this task.",
+            ephemeral: true
+          });
+        }
+
+        db.prepare(`
+          UPDATE tasks
+          SET status = 'completed'
+          WHERE id = ?
+        `).run(id);
+
+        return interaction.reply(
+          `✅ Task **${task.title}** has been completed.`
+        );
+      }
+    }
+
+    // ========================================================
+    // DEV POLL
+    // ========================================================
+
+    if (command === "devpoll") {
+
+      const question =
+        interaction.options.getString("question");
+
+      const option1 =
+        interaction.options.getString("option1");
+
+      const option2 =
+        interaction.options.getString("option2");
+
+      const option3 =
+        interaction.options.getString("option3");
+
+      const buttons = [
+        new ButtonBuilder()
+          .setCustomId(`poll_1_1`)
+          .setLabel(option1)
+          .setStyle(ButtonStyle.Primary),
+
+        new ButtonBuilder()
+          .setCustomId(`poll_1_2`)
+          .setLabel(option2)
+          .setStyle(ButtonStyle.Secondary)
+      ];
+
+      if (option3) {
+        buttons.push(
+          new ButtonBuilder()
+            .setCustomId(`poll_1_3`)
+            .setLabel(option3)
+            .setStyle(ButtonStyle.Success)
+        );
+      }
+
+      return interaction.reply({
+        embeds: [
+          new EmbedBuilder()
+            .setTitle("📊 Developer Poll")
+            .setDescription(`**${question}**`)
+            .setFooter({
+              text: `Created by ${interaction.user.tag}`
+            })
+            .setColor(0x5865F2)
+        ],
+        components: [
+          new ActionRowBuilder().addComponents(buttons)
+        ]
+      });
+    }
+
+    // ========================================================
+    // STATUS
+    // ========================================================
+
+    if (command === "status") {
+
+      const sub =
+        interaction.options.getSubcommand();
+
+      if (sub === "set") {
+
+        const status =
+          interaction.options.getString("status");
+
+        ensureSettings(interaction.guild.id);
+
+        db.prepare(`
+          INSERT INTO statuses
+          (guild_id, user_id, status, updated_at)
+          VALUES (?, ?, ?, ?)
+          ON CONFLICT(guild_id, user_id)
+          DO UPDATE SET
+            status = excluded.status,
+            updated_at = excluded.updated_at
+        `).run(
+          interaction.guild.id,
+          interaction.user.id,
+          status,
+          Date.now()
+        );
+
+        const names = {
+          working: "🟢 Working",
+          away: "🟡 Away",
+          offline: "🔴 Offline"
+        };
+
+        return interaction.reply({
+          content: `Your status is now **${names[status]}**.`,
+          ephemeral: true
+        });
+      }
+
+      if (sub === "view") {
+
+        const statuses = db.prepare(`
+          SELECT * FROM statuses
+          WHERE guild_id = ?
+          ORDER BY status
+        `).all(interaction.guild.id);
+
+        if (!statuses.length) {
+          return interaction.reply("Nobody has set a status yet.");
+        }
+
+        const names = {
+          working: "🟢 Working",
+          away: "🟡 Away",
+          offline: "🔴 Offline"
+        };
+
+        const text = statuses.map(s =>
+          `<@${s.user_id}> — ${names[s.status] || s.status}`
+        ).join("\n");
+
+        return interaction.reply({
+          embeds: [
+            new EmbedBuilder()
+              .setTitle("👨‍💻 Developer Status")
+              .setDescription(text)
+              .setColor(0x5865F2)
+          ]
+        });
+      }
+    }
+
+    // ========================================================
+    // PRIVATE NOTES
+    // ========================================================
+
+    if (command === "note") {
+
+      const sub =
+        interaction.options.getSubcommand();
+
+      if (sub === "add") {
+
+        const text =
+          interaction.options.getString("text");
+
+        const result = db.prepare(`
+          INSERT INTO notes
+          (guild_id, user_id, note, created_at)
+          VALUES (?, ?, ?, ?)
+        `).run(
+          interaction.guild.id,
+          interaction.user.id,
+          text,
+          Date.now()
+        );
+
+        return interaction.reply({
+          content:
+            `📝 **Note #${result.lastInsertRowid} saved privately.**`,
+          ephemeral: true
+        });
+      }
+
+      if (sub === "list") {
+
+        const notes = db.prepare(`
+          SELECT * FROM notes
+          WHERE guild_id = ? AND user_id = ?
+          ORDER BY id DESC
+          LIMIT 20
+        `).all(
+          interaction.guild.id,
+          interaction.user.id
+        );
+
+        if (!notes.length) {
+          return interaction.reply({
+            content: "📝 You don't have any notes.",
+            ephemeral: true
+          });
+        }
+
+        const text = notes.map(n =>
+          `**#${n.id}** — ${clean(n.note, 300)}`
+        ).join("\n");
+
+        return interaction.reply({
+          embeds: [
+            new EmbedBuilder()
+              .setTitle("📝 Your Private Notes")
+              .setDescription(text)
+              .setColor(0x5865F2)
+          ],
+          ephemeral: true
+        });
+      }
+
+      if (sub === "delete") {
+
+        const id =
+          interaction.options.getInteger("id");
+
+        const result = db.prepare(`
+          DELETE FROM notes
+          WHERE id = ? AND guild_id = ? AND user_id = ?
+        `).run(
+          id,
+          interaction.guild.id,
+          interaction.user.id
+        );
+
+        return interaction.reply({
+          content: result.changes
+            ? "🗑️ Note deleted."
+            : "❌ Note not found.",
+          ephemeral: true
+        });
+      }
+    }
+
+    // ========================================================
+    // APPLICATION
+    // ========================================================
+
+    if (command === "apply") {
+
+      const button =
+        new ButtonBuilder()
+          .setCustomId("open_application")
+          .setLabel("Apply as Developer")
+          .setEmoji("📨")
+          .setStyle(ButtonStyle.Primary);
+
+      return interaction.reply({
+        embeds: [
+          new EmbedBuilder()
+            .setTitle("🛠️ Developer Applications")
+            .setDescription(
+              "Interested in joining the development team?\n\n" +
+              "Click the button below and complete the application."
+            )
+            .setColor(0x5865F2)
+        ],
+        components: [
+          new ActionRowBuilder().addComponents(button)
+        ]
+      });
+    }
+
+    // ========================================================
+    // RATE REQUESTS
+    // ========================================================
+
+    if (command === "rate") {
+
+      const sub =
+        interaction.options.getSubcommand();
+
+      // ------------------------------------------------------
+      // REQUEST
+      // ------------------------------------------------------
+
+      if (sub === "request") {
+
+        const current =
+          interaction.options.getString("current");
+
+        const requested =
+          interaction.options.getString("requested");
+
+        const reason =
+          interaction.options.getString("reason");
+
+        // One request per month
+        const existing = db.prepare(`
+          SELECT * FROM rate_requests
+          WHERE guild_id = ?
+          AND user_id = ?
+          AND created_at >= ?
+        `).get(
+          interaction.guild.id,
+          interaction.user.id,
+          Date.now() - (30 * 24 * 60 * 60 * 1000)
+        );
+
+        if (existing) {
+          return interaction.reply({
+            content:
+              "❌ You can only submit one rate-increase request every 30 days.",
+            ephemeral: true
+          });
+        }
+
+        const result = db.prepare(`
+          INSERT INTO rate_requests
+          (guild_id, user_id, current_rate, requested_rate, reason, created_at)
+          VALUES (?, ?, ?, ?, ?, ?)
+        `).run(
+          interaction.guild.id,
+          interaction.user.id,
+          current,
+          requested,
+          reason,
+          Date.now()
+        );
+
+        return interaction.reply({
+          embeds: [
+            new EmbedBuilder()
+              .setTitle("💰 Rate Increase Request")
+              .setDescription(
+                `Your request **#${result.lastInsertRowid}** has been submitted.`
+              )
+              .addFields(
+                {
+                  name: "Current Rate",
+                  value: current
+                },
+                {
+                  name: "Requested Rate",
+                  value: requested
+                },
+                {
+                  name: "Reason",
+                  value: clean(reason)
+                }
+              )
+              .setColor(0xFEE75C)
+          ],
+          ephemeral: true
+        });
+      }
+
+      // ------------------------------------------------------
+      // LIST
+      // ------------------------------------------------------
+
+      if (sub === "list") {
+
+        if (!isManager(interaction)) {
+          return interaction.reply({
+            content: "❌ You don't have permission to view requests.",
+            ephemeral: true
+          });
+        }
+
+        const requests = db.prepare(`
+          SELECT * FROM rate_requests
+          WHERE guild_id = ? AND status = 'pending'
+          ORDER BY id DESC
+        `).all(interaction.guild.id);
+
+        if (!requests.length) {
+          return interaction.reply("💰 No pending rate requests.");
+        }
+
+        const text = requests.map(r =>
+          `**#${r.id}** — <@${r.user_id}>\n` +
+          `${r.current_rate} → **${r.requested_rate}**\n` +
+          `${clean(r.reason, 200)}`
+        ).join("\n\n");
+
+        return interaction.reply({
+          embeds: [
+            new EmbedBuilder()
+              .setTitle("💰 Pending Rate Requests")
+              .setDescription(text)
+              .setColor(0xFEE75C)
+          ]
+        });
+      }
+
+      // ------------------------------------------------------
+      // APPROVE / DENY
+      // ------------------------------------------------------
+
+      if (sub === "approve" || sub === "deny") {
+
+        if (!isManager(interaction)) {
+          return interaction.reply({
+            content: "❌ You don't have permission.",
+            ephemeral: true
+          });
+        }
+
+        const id =
+          interaction.options.getInteger("id");
+
+        const request = db.prepare(`
+          SELECT * FROM rate_requests
+          WHERE id = ? AND guild_id = ?
+        `).get(
+          id,
+          interaction.guild.id
+        );
+
+        if (!request) {
+          return interaction.reply({
+            content: "❌ Request not found.",
+            ephemeral: true
+          });
+        }
+
+        const newStatus =
+          sub === "approve" ? "approved" : "denied";
+
+        db.prepare(`
+          UPDATE rate_requests
+          SET status = ?
+          WHERE id = ?
+        `).run(newStatus, id);
+
+        return interaction.reply(
+          `${sub === "approve" ? "✅" : "❌"} Request **#${id}** has been **${newStatus}**.`
+        );
+      }
+    }
+
+  } catch (error) {
+
+    console.error("Interaction error:", error);
+
+    if (interaction.replied || interaction.deferred) {
+      await interaction.followUp({
+        content: "❌ Something went wrong.",
+        ephemeral: true
+      }).catch(() => {});
+    } else {
+      await interaction.reply({
+        content: "❌ Something went wrong.",
+        ephemeral: true
+      }).catch(() => {});
+    }
+  }
+});
+
+// ============================================================
+// LOGIN
+// ============================================================
+
+client.login(TOKEN);
